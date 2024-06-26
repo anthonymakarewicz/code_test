@@ -149,3 +149,30 @@ if __name__ == '__main__':
 
 
 
+
+import sys
+import subprocess
+import os
+import argparse
+
+def main():
+    # Fetch the command line arguments
+    parser = argparse.ArgumentParser(description='Run test suite with a specific date.')
+    parser.add_argument('--date', type=str, default='latest', help='Date of the test data (e.g., 20231231).')
+    args = parser.parse_args()
+
+    # Set the environment variable for the test date
+    os.environ['TEST_DATE'] = args.date
+
+    # Run the unit tests
+    subprocess.run([sys.executable, '-m', 'unittest', 'discover', 'tests/unit'], check=True)
+
+    # Run the integration tests
+    subprocess.run([sys.executable, '-m', 'unittest', 'discover', 'tests/integration'], check=True)
+
+if __name__ == '__main__':
+    main()
+
+
+
+
