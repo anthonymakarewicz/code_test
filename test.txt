@@ -176,3 +176,33 @@ if __name__ == '__main__':
 
 
 
+import os
+from pathlib import Path
+import argparse
+from datetime import datetime
+
+def validate_date(date_str):
+    try:
+        datetime.strptime(date_str, '%Y%m%d')
+        return True
+    except ValueError:
+        return False
+
+def main():
+    parser = argparse.ArgumentParser(description='Set test date environment variable.')
+    parser.add_argument('--date', type=str, default='latest', help='Date of the test data (e.g., 20231231).')
+    args = parser.parse_args()
+
+    if not validate_date(args.date):
+        raise ValueError("Invalid date format. Please use YYYYMMDD.")
+
+    os.environ['TEST_DATE'] = args.date
+    print(f"Environment variable TEST_DATE set to {args.date}")
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+
