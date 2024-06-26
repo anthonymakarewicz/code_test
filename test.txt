@@ -206,3 +206,46 @@ if __name__ == '__main__':
 
 
 
+
+
+
+
+import unittest
+from pathlib import Path
+import os
+import pandas as pd
+
+class TestMigMtrxs(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Fetch the date from the environment variable
+        test_date = os.getenv('TEST_DATE', 'latest')
+
+        # Determine the submodule based on the file's location
+        test_file_path = Path(__file__)
+        submodule = test_file_path.parent.parent.name
+
+        # Construct the data path
+        cls.data_path = test_file_path.parents[2] / submodule / 'data' / test_date
+        if not cls.data_path.exists():
+            raise FileNotFoundError(f"Data path {cls.data_path} does not exist.")
+
+    def test_output_matches_target(self):
+        output_file = self.data_path / 'outputs' / 'output_file1.csv'
+        target_file = self.data_path / 'targets' / 'target_file1.csv'
+
+        # Load the data
+        output_df = pd.read_csv(output_file)
+        target_df = pd.read_csv(target_file)
+
+        # Compare the dataframes
+        pd.testing.assert_frame_equal(output_df, target_df)
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+
+
+
+
