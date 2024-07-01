@@ -1,19 +1,95 @@
-main_path = os.getenv("BASE_PATH")
-input_path = os.getenv("INPUTS_PATH")
-data_lake_path = os.getenv("DATA_LAKE_PATH")
-output_path = os.getenv("OUTPUT_PATH")
+import unittest
+import numpy as np
+import datetime as dt
+import os
+from pathlib import Path
+from cloudpathlib import S3Path
+import pandas as pd
+from pandas.testing import assert_frame_equal
+from dotenv import load_dotenv
+from IST.mig_mtrxs.extract_mig_mtrxs import ExtractMM
 
-calc_dt = "20231231"
-mig_mtrx_file_nm = os.path.join(data_lake_path,  "s2/IFRS9_MIGRATION_MATRICES.parquet", f"pdate={calc_dt}")
-pd_vects_file_nm = os.path.join(input_path, "20230630_173_SAE_PD_VECTOR.csv")
-rtgs_sorted_file_nm = os.path.join(input_path, "config/ratings_sorted.xlsx")
-output_path = os.path.join(output_path, "extract_mig_mtrxs")
+load_dotenv(dotenv_path="/home/jovyan/IST_plus_v0.01/config/.env")
 
-mig_mtrx_nms = ["CZ_CORP", "HU_CORP", "WW_GOV"]
 
-extractor = ExtractMM(main_path=main_path, calc_dt=calc_dt, mig_mtrx_file_nm=mig_mtrx_file_nm,
-                      pd_vects_file_nm=pd_vects_file_nm, rtgs_sorted_file_nm=rtgs_sorted_file_nm,
-                      #output_path=output_path,
-                      save=False, log_file_nm="mig.log",
-                      mig_mtrx_nms=mig_mtrx_nms
-                      )
+class Testclass(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Store the environment variables
+        cls.main_path = cls._get_env('BASE_PATH')
+        cls.tests_path = cls._get_env('TESTS_PATH')
+        cls.test_date = cls._get_env('TEST_DATE')
+
+        # Determine the module's name based on the file's location
+        test_file_path = Path(__file__)
+        module = test_file_path.parent.parent.name
+
+        # Construct the data path
+        cls.data_path = os.path.join(cls.tests_path, module, 'data', cls.test_date)
+        if not os.path.exists(cls.data_path):
+            raise FileNotFoundError(f"Data path {cls.data_path} does not exist.")
+
+        inputs_path = os.path.join(cls.data_path, "inputs")
+        mig_mtrx_file_nm = os.path.join(inputs_path, f"{cls.test_date}_MIGRATION_MATRICES.csv")
+        pd_vects_file_nm = os.path.join(inputs_path, f"{cls.test_date}_PD_VECTORS.csv")
+        rtgs_sorted_file_nm = os.path.join(inputs_path, "ratings_sorted.xlsx")
+        output_path = os.path.join(cls.data_path, "output")
+        cls.targets_path = os.path.join(cls.data_path, "targets")
+
+        cls.mig_mtrx_nms = ["CZ_CORP", "WW_GOV"]
+        cls.mig_mtrxs_extract = ExtractMM(main_path=cls.main_path, calc_dt=cls.test_date, mig_mtrx_file_nm=mig_mtrx_file_nm,
+                                          pd_vects_file_nm=pd_vects_file_nm, rtgs_sorted_file_nm=rtgs_sorted_file_nm,
+                                          output_path=output_path,
+                                          mig_mtrx_nms=cls.mig_mtrx_nms, save=True)
+        cls.mig_mtrxs_extract.write()
+
+    @staticmethod
+    def _get_env(var_name):
+        path_str = os.getenv(var_name, "")
+        if not path_str:
+            raise RuntimeError(f"The {var_name} environment variable has not been properly configured in the .env file")
+        return path_str
+
+    def test_mig_mtrxs(self):
+        for mig_mtrx_nm, calc_mig_mtrx in self.mig_mtrxs_extract.mig_mtrxs.items():
+            mig_mtrx_target_file_nm = os.path.join(self.targets_path, "target-" +
+                                                    mig_mtrx_nm + "-mig_mtrx.csv")
+
+            target_mig_mtrx = np.genfromtxt(mig_mtrx_target_file_nm,
+                                            delimiter=",",
+                                            dtype=float)
+            try:
+                np.allclose(calc_mig_mtrx, target_mig_mtrx, atol=1e-5)
+            except AssertionError as e:
+                self.fail(f"Mismatch found in migration matrix for {mig_mtrx_nm}")
+
+    def test_pd_vects(self):
+        for mig_mtrx_nm, calc_pd_vect in self.mig_mtrxs_extract.pd_vects.items():
+            pd_vects_target_file_nm = os.path.join(self.targets_path, "target-" +
+                                                    mig_mtrx_nm + "-pd_vector.csv")
+
+            target_mig_mtrx = np.genfromtxt(pd_vects_target_file_nm,
+                                            delimiter=",",
+                                            dtype=float)
+            try:
+                np.allclose(calc_pd_vect, target_mig_mtrx, atol=1e-5)
+            except AssertionError as e:
+                self.fail( f"Mismatch found in pd vector for {mig_mtrx_nm}")
+
+    def test_pd_ratings(self):
+        for mig_mtrx_nm, calc_pd_grps in self.mig_mtrxs_extract.pd_grps.items():
+            print(type(calc_pd_grps))
+            print()
+            pd_grps_target_file_nm = os.path.join(self.targets_path, "target-" +
+                                                    mig_mtrx_nm + "-pd_grps.csv")
+
+            target_mig_mtrx = pd.read_csv(pd_grps_target_file_nm, header=None)
+       
+            try:
+                assert_frame_equal(pd.DataFrame(calc_pd_grps), target_mig_mtrx, check_names=False)
+            except AssertionError as e:
+                self.fail(f"Mismatch found in pd groups for {mig_mtrx_nm}")
+
+
+if (__name__ == '__main__'):
+    unittest.main()
