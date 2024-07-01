@@ -1,22 +1,24 @@
-import sys
-import subprocess
-import os
-import argparse
+from pyspark.sql import SparkSession
 
-def main():
-    # Fetch the command line arguments
-    parser = argparse.ArgumentParser(description='Run test suite with a specific date.')
-    parser.add_argument('--date', type=str, default='latest', help='Date of the test data (e.g., 20231231).')
-    args = parser.parse_args()
+class SparkSessionManager:
+    def __init__(self, app_name="DefaultAppName", master="local[*]", config_options=None):
+        self.app_name = app_name
+        self.master = master
+        self.config_options = config_options if config_options else {}
+        self.spark_session = None
 
-    # Set the environment variable for the test date
-    os.environ['TEST_DATE'] = args.date
+    def __enter__(self):
+        spark_builder = SparkSession.builder.appName(self.app_name)
+        
+        if self.master:
+            spark_builder = spark_builder.master(self.master)
 
-    # Run the unit tests
-    subprocess.run([sys.executable, '-m', 'unittest', 'discover', 'tests/unit'], check=True)
+        for key, value in self.config_options.items():
+            spark_builder = spark_builder.config(key, value)
 
-    # Run the integration tests
-    subprocess.run([sys.executable, '-m', 'unittest', 'discover', 'tests/integration'], check=True)
+        self.spark_session = spark_builder.getOrCreate()
+        return self.spark_session
 
-if __name__ == '__main__':
-    main()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.spark_session:
+            self.spark_session.stop()
