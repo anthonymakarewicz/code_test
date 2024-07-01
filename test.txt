@@ -1,16 +1,389 @@
-cls.main_path = cls._get_env_path('BASE_PATH')
-        cls.input_path = cls._get_env_path('INPUTS_PATH')
-        cls.tests_path = cls._get_env_path('TESTS_PATH')
-        
-        cls.mig_mtrx_nms = ["CZ_CORP", "HU_CORP", "WW_GOV"]
-        
-        cls.data_lake_path = Path(cls.tests_path) / "data" / "mig_mtrxs" / os.getenv('TEST_DATE', 'latest')
-        
-        cls.calc_dt = "20231231"
+"""Extract migration matrix, PD vector and PD group information."""
 
-    @staticmethod
-    def _get_env_path(var_name):
-        path_str = os.getenv(var_name, "")
-        if not path_str:
-            raise RuntimeError(f"The {var_name} environment variable has not been properly configured in the .env file")
-        return Path(path_str)
+import os
+import pandas as pd
+import numpy as np
+import copy as cp
+import datetime as dt
+from pathlib import Path
+from typing import Union
+from openpyxl import load_workbook
+from cloudpathlib import S3Path
+
+from utility_IST.my_time import get_date_time_stamp
+from utility_IST.my_logging import Logger
+
+
+class ExtractMM:
+    r"""
+    Object that extracts IFRS9 migration matrices and PD vectors.
+
+    Anthony Makarewicz
+    30/01/2024 v1.0
+
+    Description
+    -----------
+    Object that extracts IFRS9 migration matrices, PD vectors and information
+    on their corresponding PD groups and store them into a .csv file.
+
+    Example
+    -------
+    main_path = "C:\\IST_plus_v0.01\\"
+    calc_dt = dt.date(2023, 8, 31)
+    rtgs_sorted_file_nm = "ratings_sorted.xlsx"
+    mig_mtrx_nms = ["CZ_CORP", "WW_GOV"]
+
+    mig_mtrxs = ExtractMM(main_path=main_path,
+                          calc_dt=calc_dt,
+                          rtgs_sorted_file_nm=rtgs_sorted_file_nm,
+                          mig_mtrx_nms=mig_mtrx_nms,
+                          clear_log_file=True,
+                          save=True)
+
+    """
+
+    def __init__(self,
+                 main_path: str,
+                 calc_dt: str,
+                 mig_mtrx_file_nm: str,
+                 pd_vects_file_nm: str,
+                 rtgs_sorted_file_nm: str,
+                 output_path: str = "",
+                 mig_mtrx_nms: list[str] = [],
+                 log_file_nm: str = "",
+                 clear_log_file: bool = False,
+                 delimiter: str = ",",
+                 save: bool = True) -> None:
+        r"""
+        Initiate object that will extract and store IFRS9 migration matrices.
+
+        Parameters
+        ----------
+        main_path : str
+            The variable represents main path, e.g. "C:\IST_plus_v0.10". Paths
+            to all folders are expressed relatively to the main path.
+        calc_dt : dt.date
+            Date of position files, macroeconomic scenarios, setup etc. All
+            the results will be as of that date.
+        rtgs_sorted_file_nm : str
+            Name of the excel file that stores the sorted ratings for some
+            migration matrices.
+        mig_mtrx_nms : list[str], optional
+            Specify which migration matrices to extract.
+            Default value is None in which case all migration matrices are
+            extracted.
+        log_file_nm : str, optional
+            Name of log file including path. If [] is used, the name
+            is derived on fly.
+            The default is [].
+        clear_log_file : bool, optional
+            Indicates if the log file should be cleared or not.
+            The default is False.
+        delimiter : str, optional
+            Delimiter used in .csv files, i.e. position file, migratin matrix
+            files etc.
+            The default is ",".
+        save : bool, optional
+            True = Extracted migration matrices, PD vectors and PD group
+                   information are stored into .csv file.
+            False = Do not save extracted data.
+            The default is True.
+
+        """
+        # store variables into the object
+        self.main_path = self.__get_path_object(main_path)
+        self.calc_dt = calc_dt
+        self.mig_mtrx_file_nm = self.__get_path_object(mig_mtrx_file_nm)
+        self.pd_vects_file_nm = self.__get_path_object(pd_vects_file_nm)
+        self.rtgs_sorted_file_nm = self.__get_path_object(rtgs_sorted_file_nm)
+
+        # default output_path is set to the S3 output path
+        if not output_path:
+            if not os.getenv("OUTPUT_PATH", ""):
+                raise RuntimeError(f"The OUTPUT_DIR environment variable has not been properly configured in the .env file")
+            self.output_path = self.__get_path_object(os.getenv("OUTPUT_PATH", ""))
+            self.output_path = self.output_path / S3Path(__file__).stem
+        else:
+            self.output_path = self.__get_path_object(output_path)
+            self.output_path = self.output_path / Path(__file__).stem
+
+        self.mig_mtrx_nms = mig_mtrx_nms
+        self.save = save
+
+        # create logger
+        if not log_file_nm:
+            log_file_nm = main_path + self.calc_dt + "\\_log\\" +\
+                "extract_mig_mtrxs_" + get_date_time_stamp() + ".log"
+
+        self.log_file_nm = log_file_nm
+        self.clear_log_file = clear_log_file
+
+        self.Logger =\
+            Logger(log_file_nm=self.log_file_nm,
+                   clear_log_file=self.clear_log_file)
+
+        self.Logger.info("EXTRACT MIGRATION MATRICES AND PD VECTORS...")
+
+        # extract migration matrice
+        self.__load_data(file_nm=self.mig_mtrx_file_nm, file_tp="mig_mtrx")
+
+        self.__extract_mig_mtrxs(rtgs_sorted_file_nm=self.rtgs_sorted_file_nm,
+                                 mig_mtrx_nms=self.mig_mtrx_nms)
+
+        # extract PD groups
+        self.__load_data(file_nm=self.pd_vects_file_nm, file_tp="pd_vect")
+
+        self.__extract_pd_vects_grps(rtgs_sorted_file_nm=self.rtgs_sorted_file_nm,
+                                     mig_mtrx_nms=self.mig_mtrx_nms)
+
+        if not mig_mtrx_nms:
+            self.mig_mtrx_nms = list(self.mig_mtrxs.keys())
+
+        self.Logger.info("DONE!")
+        self.Logger.close()
+
+    def __get_path_object(self, path: str) -> Union[Path, S3Path]:
+        if path.startswith("s3://"):
+            return S3Path(path)
+        else:
+            return Path(path)
+
+    def __load_data(self, file_nm: Union[Path, S3Path], file_tp: str) -> None:
+        r"""
+        Load the data from a .csv file to a pd.DataFrame.
+
+        Parameters
+        ----------
+        file_nm : str
+            Name of .csv file to extract data from.
+        file_tp : str
+            Type of .csv file.
+            "mig_mtrx" = The .csv file contains migration matrix data.
+            "pd_vect" = The .csv file contains information on PD vector and
+                        PD groups.
+
+        Raises
+        ------
+        ValueError
+            Incorrect file type.
+
+        Returns
+        -------
+        data :pd.DataFrame
+            DataFrame holding the values of the .csv file
+
+        """
+        if file_nm.suffix == ".csv": 
+            data = pd.read_csv(str(file_nm))
+        
+        elif file_nm.parent.suffix == ".parquet":
+            data = pd.read_parquet(str(file_nm))
+        else:
+            raise ValueError(f"Unsupported file format: {file_nm}. Choose either parquet or csv")
+
+        if (file_tp == "mig_mtrx"):
+            if (data["PROBABILITY"].dtype == "object"):
+                if data["PROBABILITY"].str.contains("%").any():
+                    data["PROBABILITY"] = data["PROBABILITY"].str.rstrip("%")\
+                        .astype("float64") / 100
+            else:
+                data["PROBABILITY"] = data["PROBABILITY"].astype("float64")
+
+            if (data["NAME"].nunique() / len(data["NAME"]) < 0.5):
+                data["NAME"] = data["NAME"].astype("category")
+            data["PARTITION_KEY"] = data["PARTITION_KEY"].astype("uint32")
+
+        elif (file_tp == "pd_vect"):
+            if (data["BASE_PD"].dtype == "object"):
+                if data["BASE_PD"].str.contains("%").any():
+                    data["BASE_PD"] = data["BASE_PD"].str.rstrip("%")\
+                        .astype("float64") / 100
+            else:
+                data["BASE_PD"] = data["BASE_PD"].astype("float64")
+
+            if data["MODEL_NAME"].nunique() / len(data["MODEL_NAME"]) < 0.5:
+                data["MODEL_NAME"] = data["MODEL_NAME"].astype("category")
+
+            data["PARTITION_KEY"] = data["PARTITION_KEY"].astype("uint32")
+            data["STATUS"] = data["STATUS"].astype("category")
+
+        else:
+            raise ValueError("Wrong file type! The function supports",
+                             "either migration matrix of PD vector",
+                             "file type.")
+
+        self.extract = data
+
+    def __extract_mig_mtrxs(self,
+                            rtgs_sorted_file_nm: Union[Path, S3Path],
+                            mig_mtrx_nms: list[str] = []) -> None:
+        r"""
+        Extract migration matrices.
+
+        Description
+        -----------
+        Extract migration matrices and store the result for each migration
+        matrix into a separate .csv file if required. By default the function
+        extracts all the migration matrices and does not store them.
+
+        Parameters
+        ----------
+        rtgs_sorted_file_nm : str
+            Name of the excel file that stores the sorted ratings for some
+            migration matrices.
+        mig_mtrx_nms : list[str], optional
+            Specify which migration matrices to extract.
+            Default value is None in which case all migration matrices are
+            extracted.
+
+        """
+        self.Logger.info("   IFRS9 migration matrices...")
+
+        mig_mtrxs = {}
+        rtgs_sorted = load_workbook(rtgs_sorted_file_nm)
+        mig_mtrx_nms_sorted = rtgs_sorted.sheetnames
+
+        if not mig_mtrx_nms:
+            mig_mtrx_nms = self.extract["NAME"].unique().tolist()
+
+        for mig_mtrx_nm in mig_mtrx_nms:
+            self.Logger.info("      " + mig_mtrx_nm)
+            if (mig_mtrx_nm not in self.extract["NAME"].unique().tolist()):
+                raise ValueError(f"{mig_mtrx_nm} is not a supported",
+                                 "migration matrix name!")
+
+            # filter data only for the selected migration matrix
+            idx = self.extract["NAME"] == mig_mtrx_nm
+            mig_mtrx_data = self.extract.loc[idx].copy()
+
+            if mig_mtrx_nm in mig_mtrx_nms_sorted:
+                rtgs = []
+                for row in rtgs_sorted[mig_mtrx_nm].iter_rows(values_only=True):
+                    rtgs.append(row[0])
+
+                if (len(rtgs) != len(mig_mtrx_data["START_STATE"].unique().tolist())):
+                    raise ValueError(f"{mig_mtrx_nm} has a different number " +
+                                     "of ratings!")
+            else:
+                rtgs = mig_mtrx_data["START_STATE"].unique().tolist()
+
+            mig_mtrx = np.zeros((len(rtgs), len(rtgs)), dtype="float64") 
+            for i, rtg_row in enumerate(rtgs):
+                for j, rtg_col in enumerate(rtgs):
+                    row_idx = (mig_mtrx_data["START_STATE"] == rtg_row)
+                    col_idx = (mig_mtrx_data["END_STATE"] == rtg_col)
+                    mig_mtrx[i, j] =\
+                        mig_mtrx_data[row_idx & col_idx]["PROBABILITY"].iloc[0]
+
+            mig_mtrxs[mig_mtrx_nm] = mig_mtrx
+
+        del self.extract
+        self.mig_mtrxs = mig_mtrxs
+
+    def __extract_pd_vects_grps(self,
+                                rtgs_sorted_file_nm: Union[Path, S3Path],
+                                mig_mtrx_nms: list[str] = []) -> None:
+        r"""
+        Extract the PD vectors, PD groups and their corresponding status.
+
+        Anthony Makarewicz
+        30/01/2024
+
+        Description
+        ----------
+        Extract the PD vectors, PD groups and their corresponding status from
+        data, and store the result for each migration matrix into a .csv file
+        if the ouput folder name is specified.
+
+        Parameters
+        ----------
+        rtgs_sorted_file_nm : str
+            Name of the excel file that stores the sorted ratings for some
+            migration matrices.
+        mig_mtrx_nms : list[str], optional
+            Specify which migration matrices to extract.
+            Default value is None in which case all migration matrices are
+            extracted.
+
+        """
+        self.Logger.info("   IFRS9 PD vectors and PD groups " +
+                         "information...")
+
+        rtgs_sorted = load_workbook(rtgs_sorted_file_nm)
+        mig_mtrx_nms_sorted = rtgs_sorted.sheetnames
+
+        pd_vects = {}
+        pd_grps = {}
+
+        if not mig_mtrx_nms:
+            mig_mtrx_nms = self.extract["MODEL_NAME"].unique().tolist()
+
+        for mig_mtrx_nm in mig_mtrx_nms:
+            self.Logger.info("      " + mig_mtrx_nm)
+            if (mig_mtrx_nm not in mig_mtrx_nms):
+                raise ValueError(f"{mig_mtrx_nm} is not a supported " +
+                                 "migration matrix name!")
+
+            idx = self.extract["MODEL_NAME"] == mig_mtrx_nm
+            mig_mtrx_data = cp.deepcopy(self.extract.loc[idx])
+
+            if (mig_mtrx_nm in mig_mtrx_nms_sorted):
+                rtgs = []
+                for row in rtgs_sorted[mig_mtrx_nm].iter_rows(values_only=True):
+                    rtgs.append(row[0])
+                if (len(rtgs) != len(mig_mtrx_data["RATING"].unique())):
+                    raise ValueError(f"{mig_mtrx_data} has a different ",
+                                     "number of ratings!")
+                # sort the ratings row-wise
+                else:
+                    mig_mtrx_data["RATING_SORTED"] =\
+                        mig_mtrx_data["RATING"].map(lambda x: rtgs.index(x))
+                    mig_mtrx_data.sort_values(by="RATING_SORTED", inplace=True)
+                    mig_mtrx_data.drop("RATING_SORTED", axis=1, inplace=True)
+
+            # sort alphabetically
+            else:
+                mig_mtrx_data = mig_mtrx_data.sort_values(["RATING"])
+
+            pd_vect = mig_mtrx_data["BASE_PD"]
+            pd_grp = mig_mtrx_data["RATING"]
+            stat = mig_mtrx_data["STATUS"]
+
+            pd_vects[mig_mtrx_nm] = np.array(pd_vect)
+            pd_grps[mig_mtrx_nm] = np.array([pd_grp, stat]).T
+
+        del self.extract
+        self.pd_vects = pd_vects
+        self.pd_grps = pd_grps
+
+    def write(self):
+        """
+        Write extracted migration matrices and PD vectors into .csv file.
+
+        Anthony Makarewicz
+        30/01/2024
+
+        Parameters
+        ----------
+        None.
+
+        """
+        self.Logger.info("EXTRACT - Write migration matrices and PD " +
+                         "vectors into .csv files...")
+
+        for mig_mtrx_nm in self.mig_mtrx_nms:
+            mig_mtrx_folder_nm = self.output_path / mig_mtrx_nm
+
+            # create output directories for results stored on local 
+            if isinstance(self.output_path, Path):
+                mig_mtrx_folder_nm.mkdir(parents=True, exist_ok=True)
+
+            mig_mtrx_file_nm = mig_mtrx_folder_nm / f"{mig_mtrx_nm}_mig_mtrx.csv"
+            pd_vect_file_nm = mig_mtrx_folder_nm / f"{mig_mtrx_nm}_pd_vector.csv"
+            grp_file_nm = mig_mtrx_folder_nm / f"{mig_mtrx_nm}_pd_grps.csv"
+
+            # always convert the Path or S3Path object to str when reading/writing !
+            pd.DataFrame(self.mig_mtrxs[mig_mtrx_nm]).to_csv(str(mig_mtrx_file_nm), index=False)
+            pd.DataFrame(self.pd_vects[mig_mtrx_nm]).to_csv(str(pd_vect_file_nm), index=False)
+            pd.DataFrame(self.pd_grps[mig_mtrx_nm]).to_csv(str(grp_file_nm), index=False)
+
