@@ -1,30 +1,59 @@
-import unittest
 import os
+import shutil
+from pathlib import Path
+import boto3
 import argparse
-import test_config
+from datetime import datetime
 
-def main():
-    # Fetch the command line arguments
-    parser = argparse.ArgumentParser(description='Run test suite with a specific date.')
-    parser.add_argument('--date', type=str, default='latest', help='Date of the test data (e.g., 20231231).')
-    args = parser.parse_args()
-
-    # Validate and set the environment variable for the test date
+def validate_date(date_str):
     try:
-        test_config.main(['--date', args.date])
-    except ValueError as e:
-        print(f"Error: {e}")
+        datetime.strptime(date_str, '%Y%m%d')
+        return True
+    except ValueError:
+        return False
+
+def download_from_s3(bucket_name, s3_path, local_path):
+    s3 = boto3.client('s3')
+    os.makedirs(local_path, exist_ok=True)
+    
+    for obj in s3.list_objects_v2(Bucket=bucket_name, Prefix=s3_path).get('Contents', []):
+        file_key = obj['Key']
+        file_name = os.path.basename(file_key)
+        if file_name:  # Ensure it's not a directory
+            s3.download_file(bucket_name, file_key, os.path.join(local_path, file_name))
+    print(f"Downloaded data from s3://{bucket_name}/{s3_path} to {local_path}")
+
+def update_latest_symlink(base_path):
+    if base_path.exists() and base_path.is_symlink():
+        base_path.unlink()
+    elif base_path.exists() and base_path.is_dir():
+        shutil.rmtree(base_path)
+    base_path.symlink_to(base_path)
+    print(f"Updated 'latest' symlink to {base_path}")
+
+def main(date, submodule):
+    if not validate_date(date):
+        print("Invalid date format. Please use YYYYMMDD.")
         return
+    
+    bucket_name = 'your-s3-bucket'
+    s3_base_path = f'path/to/your/data/{submodule}'
+    local_base_path = Path(f'tests/{submodule}/data')
 
-    # Discover and run unit tests
-    print("Running unit tests...")
-    unit_tests = unittest.TestLoader().discover('tests/unit')
-    unittest.TextTestRunner(verbosity=2).run(unit_tests)
+    # Create the path for the specified date
+    data_path = local_base_path / date
+    s3_path = f"{s3_base_path}/{date}"
 
-    # Discover and run integration tests
-    print("Running integration tests...")
-    integration_tests = unittest.TestLoader().discover('tests/integration')
-    unittest.TextTestRunner(verbosity=2).run(integration_tests)
+    # Download data from S3
+    download_from_s3(bucket_name, s3_path, data_path)
+
+    # Update the 'latest' symlink to point to the most recent data
+    update_latest_symlink(local_base_path)
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Import data for a specific date.')
+    parser.add_argument('--date', type=str, required=True, help='Date of the data to import (e.g., 20231231).')
+    parser.add_argument('--submodule', type=str, required=True, help='Submodule name (e.g., mig_mtrxs).')
+    args = parser.parse_args()
+
+    main(args.date, args.submodule)
