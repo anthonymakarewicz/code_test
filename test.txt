@@ -1,25 +1,71 @@
+import pandas as pd
+import numpy as np
+import time
 from pyspark.sql import SparkSession
+from my_spark import SparkSessionManager
 
-class SparkSessionManager:
-    def __init__(self, app_name="ISTAppName", master="local[*]", config_options=None):
-        self.app_name = app_name
-        self.master = master
-        self.config_options = config_options if config_options else {}
-        self.spark_session = None
+# Create a large synthetic dataset with random data
+def create_large_csv(file_path, num_rows=10**7):
+    print("Creating large CSV file...")
+    df = pd.DataFrame({
+        'id': np.arange(num_rows),
+        'value1': np.random.rand(num_rows),
+        'value2': np.random.rand(num_rows),
+        'category': np.random.choice(['A', 'B', 'C', 'D'], num_rows)
+    })
+    df.to_csv(file_path, index=False)
+    print("CSV file created.")
 
-    def __enter__(self):
-        spark_builder = SparkSession.builder.appName(self.app_name)
+# Pandas operations
+def pandas_operations(file_path):
+    start_time = time.time()
+    df = pd.read_csv(file_path)
+    print(f"Pandas: Read CSV in {time.time() - start_time:.2f} seconds")
+    
+    start_time = time.time()
+    df['value_sum'] = df['value1'] + df['value2']
+    print(f"Pandas: Column addition in {time.time() - start_time:.2f} seconds")
+    
+    start_time = time.time()
+    result = df.groupby('category').agg({'value_sum': 'sum'}).reset_index()
+    print(f"Pandas: Group by and aggregation in {time.time() - start_time:.2f} seconds")
+    
+    return result
+
+# Spark operations
+def spark_operations(file_path):
+    start_time = time.time()
+    with SparkSessionManager(app_name="PerformanceComparison") as spark:
+        df = spark.read.csv(file_path, header=True, inferSchema=True)
+        print(f"Spark: Read CSV in {time.time() - start_time:.2f} seconds")
         
-        if self.master:
-            spark_builder = spark_builder.master(self.master)
+        start_time = time.time()
+        df = df.withColumn('value_sum', df['value1'] + df['value2'])
+        print(f"Spark: Column addition in {time.time() - start_time:.2f} seconds")
+        
+        start_time = time.time()
+        result = df.groupBy('category').sum('value_sum').toPandas()
+        print(f"Spark: Group by and aggregation in {time.time() - start_time:.2f} seconds")
+        
+        return result
 
-        for key, value in self.config_options.items():
-            spark_builder = spark_builder.config(key, value)
+def main():
+    file_path = "large_dataset.csv"
+    
+    # Create a large CSV file if it doesn't exist
+    create_large_csv(file_path)
+    
+    print("\n--- Pandas Performance ---")
+    pandas_result = pandas_operations(file_path)
+    
+    print("\n--- Spark Performance ---")
+    spark_result = spark_operations(file_path)
+    
+    print("\n--- Results ---")
+    print("Pandas Result:")
+    print(pandas_result)
+    print("\nSpark Result:")
+    print(spark_result)
 
-        self.spark_session = spark_builder.getOrCreate()
-        return self.spark_session
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.spark_session:
-            self.spark_session.stop()
-
+if __name__ == '__main__':
+    main()
