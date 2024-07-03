@@ -1,49 +1,25 @@
-import sys
-import os
-import argparse
-import unittest
-from pathlib import Path
+from pyspark.sql import SparkSession
 
-import setup.test_config as test_config
+class SparkSessionManager:
+    def __init__(self, app_name="ISTAppName", master="local[*]", config_options=None):
+        self.app_name = app_name
+        self.master = master
+        self.config_options = config_options if config_options else {}
+        self.spark_session = None
 
-def discover_submodules(root_dir):
-    submodules = []
-    for item in os.listdir(root_dir):
-        if os.path.isdir(os.path.join(root_dir, item)) and item != 'setup':
-            submodules.append(item)
-    return submodules
-
-def main():
-    # Fetch the command line arguments
-    parser = argparse.ArgumentParser(description='Run test suite with a specific date.')
-    parser.add_argument('--date', type=str, default='latest', help='Date of the test data (e.g., 20231231).')
-    args = parser.parse_args()
-
-    # Validate and set the test date
-    try:
-        test_config.main(["--date", args.date])
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-    # Discover submodules and run tests
-    script_dir = Path(__file__).resolve().parent
-    tests_root_dir = script_dir / 'tests'
-    submodules = discover_submodules(tests_root_dir)
-
-    for submodule in submodules:
-        unit_test_path = tests_root_dir / submodule / 'unit'
-        integration_test_path = tests_root_dir / submodule / 'integration'
+    def __enter__(self):
+        spark_builder = SparkSession.builder.appName(self.app_name)
         
-        if unit_test_path.exists():
-            print(f"Running unit tests for {submodule}...")
-            unit_tests = unittest.TestLoader().discover(str(unit_test_path))
-            unittest.TextTestRunner(verbosity=2).run(unit_tests)
-        
-        if integration_test_path.exists():
-            print(f"Running integration tests for {submodule}...")
-            integration_tests = unittest.TestLoader().discover(str(integration_test_path))
-            unittest.TextTestRunner(verbosity=2).run(integration_tests)
+        if self.master:
+            spark_builder = spark_builder.master(self.master)
 
-if __name__ == '__main__':
-    main()
+        for key, value in self.config_options.items():
+            spark_builder = spark_builder.config(key, value)
+
+        self.spark_session = spark_builder.getOrCreate()
+        return self.spark_session
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.spark_session:
+            self.spark_session.stop()
+
